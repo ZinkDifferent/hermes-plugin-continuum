@@ -3,9 +3,8 @@ version: 0.1.0
 description: "Session continuity engine + enforcement harness. Gap detection with task resumption, mandatory skill matching per task, connection registry, verify-before-act and one-failure-lockout gates."
 author: hzink
 license: MIT
-homepage: ""
+homepage: https://github.com/ZinkDifferent/hermes-plugin-continuum
 tags: [enforcement, continuity, session, gates]
-manifest_version: 2
 api_version: 1
 provides_hooks:
   - on_session_start
