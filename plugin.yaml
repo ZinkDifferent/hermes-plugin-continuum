@@ -14,3 +14,35 @@ provides_hooks:
   - post_llm_call
 provides_commands:
   - continuum
+
+# Skills referenced by the task-skill routing map (DEFAULT_SKILL_MAP in state.py).
+# These must be installed in ~/.hermes/skills/ for full Continuum functionality.
+# Missing skills are reported via /continuum status as "skills_missing" — the plugin
+# still works without them, but task-skill gating won't enforce their loading.
+requires_skills:
+  - proxmox-ve
+  - esxi-proxmox-vm-migration
+  - cloudpanel
+  - wordpress-router
+  - wp-wpcli-and-ops
+  - grommunio
+  - imap-migration
+  - ssl-certificate-management
+  - nginx-ssl
+  - self-hosted-dns
+  - shipment-tracker
+  - package-tracking
+  - peptide-research
+  - protocol-state-management
+  - food-logging
+  - fatsecret-api-response-patterns
+  - withings-health
+  - github-pr-workflow
+  - github-auth
+  - himalaya
+  - apple-notes
+  - apple-calendar
+  - floorplan-creation
+  - sweet-home-3d
+  - baja-ventures-site
+  - kumberland-site-consolidation
