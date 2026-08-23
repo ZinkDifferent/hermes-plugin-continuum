@@ -205,7 +205,7 @@ def save_skill_map(m):
 def match_task_to_skills(task_text):
     """Match task text against the keyword->skills map. Deterministic."""
     m = load_skill_map()
-    text_lower = (task_text or "").lower()
+    text_lower = str(task_text or "").lower()
     matched = set()
     for keywords_fragment, skills in m.items():
         for kw in ([keywords_fragment] if isinstance(keywords_fragment, str) else keywords_fragment):

@@ -86,7 +86,7 @@ def on_pre_llm_call(**kwargs):
     state.turn()["injected_blocks"].append("temporal")
 
     # ── Connections reminder when SSH-ish content present ──
-    msg_lower = state.turn()["user_message"].lower()
+    msg_lower = str(state.turn()["user_message"] or "").lower()
     conn_hints = []
     for host, info in (st.get("connections") or {}).items():
         if host.split(".")[0].lower() in msg_lower or host in msg_lower:
