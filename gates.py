@@ -1,5 +1,12 @@
 """Continuum gates: pre_tool_call enforcement + post_tool_call state updates.
 
+Host contract (verified in hermes_cli/plugins.py 6421-6495, model_tools.py 1136):
+  pre_tool_call receives: tool_name=..., args={...}, task_id, session_id, ...
+  A BLOCK must be returned as {"action": "block", "message": str}.
+  Plain-string returns are silently ignored by the host (dead code).
+  post_tool_call receives: tool_name=..., args={...}, result=<raw>, status,
+  error_type, error_message. The command lives at args["command"].
+
 Gate 1 — verify-before-act (action tool requires a verification tool this turn)
 Gate 2 — one-failure lockout (only INFRA failures lock; see below)
 Gate 3 — timeout arithmetic guard (curl/wget --max-time vs terminal timeout)
@@ -19,6 +26,15 @@ Error interpretation (refined per user direction):
     INFRA — genuine execution-environment faults: timeouts, connection
       refused/reset, DNS resolution, SSH auth failures, killed/OOM.
       These and ONLY these lock the turn.
+
+INFRA classification is COMMAND-SHAPED (2026-08-27 audit fix): a fault
+signature only locks when the command itself is a network/long-running
+operation that could genuinely produce it. Reading a log file that
+CONTAINS the word "timed out" is not a timeout — greps, cats, and other
+read-only inspection commands can never be infra failures by content
+alone. This killed the 4/4 false-positive lockouts found in production
+logs (including one where a grep over an error log containing "killed:"
+locked the turn).
 """
 
 import logging
@@ -39,6 +55,37 @@ def is_enabled():
 def set_enabled(v: bool):
     global _enabled
     _enabled = bool(v)
+
+
+# ── Host-contract helpers ────────────────────────────────────────────────
+
+def _tool_of(kwargs):
+    """Host passes tool_name; tests may pass tool. Accept both."""
+    tool = kwargs.get("tool_name") or kwargs.get("tool") or ""
+    return str(tool)
+
+
+def _args_of(kwargs):
+    """Host nests tool arguments under args (dict). Accept top-level too."""
+    a = kwargs.get("args")
+    if isinstance(a, dict):
+        return a
+    # Fallback for legacy/test callers passing fields at top level
+    return kwargs
+
+
+def _command_of(kwargs):
+    a = _args_of(kwargs)
+    c = a.get("command") or ""
+    return c if isinstance(c, str) else str(c)
+
+
+def _result_text(result):
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        return str(result.get("output") or result.get("content") or "")
+    return str(result or "")
 
 
 # ── Error classification (refined interpretation) ──────────────────────
@@ -68,7 +115,7 @@ _BENIGN_NOTFOUND_SIGNATURES = (
     "no matches",
 )
 
-# Genuine infrastructure faults — the ONLY class that locks the turn
+# Genuine infrastructure fault signatures — the ONLY class that locks.
 _INFRA_SIGNATURES = (
     "command timed out",
     "timed out after",
@@ -84,6 +131,31 @@ _INFRA_SIGNATURES = (
     "out of memory",
 )
 
+# Commands that CAN genuinely produce infra faults. Only these may lock
+# on a content signature. Read-only inspection commands (grep/cat/ls/
+# find/head/tail/awk/sed/wc/which/file/stat/echo/printf/true/false/test,
+# python reading files, git log/show/diff/status...) are excluded even
+# when their output mentions a fault string.
+_INFRA_CAPABLE_RE = re.compile(
+    r"\b(curl|wget|ssh|scp|sftp|sshpass|rsync|nc|netcat|telnet|ftp|"
+    r"ping|dig|nslookup|host|git\s+(push|pull|fetch|clone|ls-remote)|"
+    r"pip3?\s+install|pipx|uv\s+(pip\s+)?install|npm\s+(install|ci|run)|"
+    r"brew\s+install|apt(-get)?\s+install|brew|make|cmake|"
+    r"docker\s+(build|pull|push|compose)|hermes\s+update|tar|gunzip|"
+    r"systemctl|launchctl|brew\s+(upgrade|update)|softwareupdate)\b",
+    re.I,
+)
+
+# Read-only inspection commands: their output text is DATA, never a
+# live fault report about the command itself. Never lock on these.
+_READ_ONLY_INSPECTION_RE = re.compile(
+    r"^\s*(grep|egrep|fgrep|rg|ag|cat|head|tail|less|more|ls|find|"
+    r"awk|sed\s+-n|wc|which|file|stat|echo|printf|true|false|test|"
+    r"python3?\s+-c\s|python3?\s+-m\s+json\.tool|jq|sqlite3|git\s+(log|show|diff|status|grep)|"
+    r"ps\b|lsof|du\b|df\b)\b",
+    re.I,
+)
+
 
 def _find_signatures(text, signatures):
     low = (text or "").lower()
@@ -93,40 +165,40 @@ def _find_signatures(text, signatures):
 def classify_failure(command="", result=None, error=None):
     """Return 'expected' | 'command' | 'infra' | None.
 
-    Precedence matters: benign-not-found beats tool-error (a query tool
-    returning not_found IS its answer even if wrapped in an error field);
-    infra beats expected (an ssh auth failure during a test run still locks).
+    Precedence: benign-not-found beats tool-error; infra beats expected
+    (an ssh auth failure during a test run still locks) — BUT only when
+    the command shape could genuinely have produced the fault.
     """
-    err_text = ""
+    # Tool-level errors (exceptions raised by the tool itself)
     if error and not isinstance(error, bool):
         err_text = str(error)
-        out_text = ""
-        if isinstance(result, dict):
-            out_text = str(result.get("output") or "")
-        elif isinstance(result, str):
-            out_text = result
-
-        # Tool error wrapping a benign answer → expected
+        out_text = _result_text(result)
         if _find_signatures(err_text + " " + out_text, _BENIGN_NOTFOUND_SIGNATURES):
             return "expected"
         return "infra"
 
     exit_code = None
-    output = ""
+    output = _result_text(result)
     if isinstance(result, dict):
         exit_code = result.get("exit_code")
-        output = str(result.get("output") or "")
     elif isinstance(result, str):
         m = re.search(r"exit_code[\"']?\s*[:=]\s*(\d+)", result)
         if m:
             exit_code = int(m.group(1))
-        output = result
 
     combined = output
 
-    # Infra first: a real fault hides behind any command shape
+    # Infra first: a real fault hides behind any command shape —
+    # but only if the command could genuinely have caused one.
     if _find_signatures(combined, _INFRA_SIGNATURES):
-        return "infra"
+        if _READ_ONLY_INSPECTION_RE.match(command or ""):
+            # Output is quoted data (log lines, file contents). A grep
+            # that prints "timed out" did not time out.
+            pass
+        elif _INFRA_CAPABLE_RE.search(command or ""):
+            return "infra"
+        # Command shapes outside both lists: treat as non-infra signal.
+        # Conservative: avoids locking on unknown read-only shapes.
 
     # Benign answers
     if _find_signatures(combined, _BENIGN_NOTFOUND_SIGNATURES):
@@ -212,24 +284,33 @@ def _ssh_guard(command):
 # ── pre_tool_call ───────────────────────────────────────────────────────
 
 def on_pre_tool_call(**kwargs):
-    """Return error string to block, or None to pass."""
+    """Return {"action": "block", "message": str} to block, or None to pass.
+
+    The host IGNORES plain-string returns from pre_tool_call
+    (hermes_cli/plugins.py _get_pre_tool_call_directive_details:
+    'if not isinstance(result, dict): continue').
+    """
     if not _enabled:
         return None
 
-    tool = kwargs.get("tool") or kwargs.get("tool_name") or ""
+    tool = _tool_of(kwargs)
     t = state.turn()
 
     # Turn-state updates from this call itself
     if tool in state.VERIFICATION_TOOLS:
         t["verification_called"] = True
     if tool == "skill_view":
-        name = kwargs.get("name") or kwargs.get("skill_name")
+        a = _args_of(kwargs)
+        name = a.get("name") or a.get("skill_name")
         if name:
             t["skills_loaded"].add(str(name))
 
+    def _block(msg):
+        return {"action": "block", "message": msg}
+
     # Gate 2 — lockout check first (only infra failures lock)
     if tool in state.ACTION_TOOLS and t["locked"]:
-        return (
+        return _block(
             "CIRCE LOCKOUT: an infrastructure failure already occurred this "
             "turn. All further action tools are blocked. Inform the user of "
             "the failure and ask for guidance before proceeding."
@@ -237,7 +318,7 @@ def on_pre_tool_call(**kwargs):
 
     # Gate 1 — verify-before-act
     if tool in state.ACTION_TOOLS and not t["verification_called"]:
-        return (
+        return _block(
             "VERIFY BEFORE ACT: no verification tool (read_file, search_files, "
             "session_search, skill_view, web_search...) has been called this "
             "turn. Check available evidence first, then retry."
@@ -251,7 +332,7 @@ def on_pre_tool_call(**kwargs):
     if tool in state.ACTION_TOOLS and required:
         missing = set(required) - t["skills_loaded"]
         if missing and not st.get("no_skill_ack"):
-            return (
+            return _block(
                 f"SKILL REQUIRED: active task requires {', '.join(sorted(required))}. "
                 f"Not yet loaded this turn: {', '.join(sorted(missing))}. "
                 f"Call skill_view for them first, or have the user run "
@@ -259,18 +340,19 @@ def on_pre_tool_call(**kwargs):
             )
 
     # Command-level checks
-    command = kwargs.get("command") or ""
+    command = _command_of(kwargs)
     if command and tool in ("terminal", "process"):
         # Gate 3 — timeout arithmetic
-        tt = kwargs.get("timeout")
+        a = _args_of(kwargs)
+        tt = a.get("timeout")
         violation = _timeout_arithmetic_violation(command, tt)
         if violation:
-            return f"TIMEOUT ARITHMETIC: {violation}"
+            return _block(f"TIMEOUT ARITHMETIC: {violation}")
         # Gate 6 — SSH guard
         if _SSH_RE.search(command):
             problem = _ssh_guard(command)
             if problem:
-                return problem
+                return _block(problem)
         # Track connections from ssh commands carrying user@host
         target = _ssh_target(command)
         if target and "@" in command:
@@ -286,10 +368,10 @@ def on_pre_tool_call(**kwargs):
 def on_post_tool_call(**kwargs):
     if not _enabled:
         return None
-    tool = kwargs.get("tool") or kwargs.get("tool_name") or ""
+    tool = _tool_of(kwargs)
     result = kwargs.get("result")
     error = kwargs.get("error")
-    command = kwargs.get("command") or ""
+    command = _command_of(kwargs)
 
     t = state.turn()
     if tool in state.ACTION_TOOLS:
@@ -314,11 +396,7 @@ def on_post_tool_call(**kwargs):
 
     # SSH auth-failure detection (one-strike rule) — only for real ssh usage
     if tool in ("terminal", "process"):
-        out_text = ""
-        if isinstance(result, str):
-            out_text = result
-        elif isinstance(result, dict):
-            out_text = str(result.get("output") or "")
+        out_text = _result_text(result)
         low = out_text.lower()
         if _SSH_RE.search(command or "") and any(sig in low for sig in (
             "permission denied (publickey,password)",

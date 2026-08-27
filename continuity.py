@@ -5,6 +5,13 @@ Req 2 — ENFORCEABLE skill digest re-injection while task is active
 Req 3 — task detection (keyword-based, user-steerable via /continuum task)
 Req 4 — fact_store entity lookup + injection; auto fact_feedback post-turn
 Req 5 — claim provenance flagging (post_llm_call), amnesia-pattern detection
+
+Host contract (verified in agent/turn_context.py:1279, agent/turn_finalizer.py:632):
+  pre_llm_call receives: session_id, task_id, turn_id, user_message,
+    conversation_history, is_first_turn, model, platform, ...
+    A string (or {"context": str}) return is injected into the user message.
+  post_llm_call receives: session_id, task_id, turn_id, user_message,
+    assistant_response, conversation_history, model, platform.
 """
 
 import logging
@@ -49,13 +56,15 @@ def on_pre_llm_call(**kwargs):
         gap_seconds = time.time() - last
         if gap_seconds > state.GAP_THRESHOLD_SECONDS:
             blocks.append(_resumption_block(st, gap_seconds))
+            # Register so post_llm_call amnesia detection can arm.
+            state.turn()["injected_blocks"].append("resumption")
             state.update_session(lambda s: s.update({"gap_resumed": True}))
 
     # ── Req 3: task awareness ──
     task = st.get("active_task")
     if not task and state.turn()["user_message"]:
         # Auto-detect from keywords in first substantial message after idle
-        detected = state.match_task_to_skills(state.turn()["user_message"])
+        detected = state.match_task_to_skills(str(state.turn()["user_message"]))
         if detected:
             pass  # don't auto-set task; surface suggestion only
     if task:
@@ -149,9 +158,14 @@ def _skill_digest_block(required_skills):
 # ── post_llm_call ───────────────────────────────────────────────────────
 
 def on_post_llm_call(**kwargs):
-    """Observer: flags, feedback. Return value ignored by host."""
+    """Observer: flags, feedback. Return value ignored by host.
+
+    Host passes the turn's final assistant text as assistant_response
+    (agent/turn_finalizer.py:632). Also accepts response/text/output for
+    the standalone test harness.
+    """
     response_text = ""
-    for key in ("response", "text", "output"):
+    for key in ("assistant_response", "response", "text", "output"):
         v = kwargs.get(key)
         if isinstance(v, str):
             response_text = v
@@ -160,7 +174,7 @@ def on_post_llm_call(**kwargs):
     t = state.turn()
 
     # ── Req 1: amnesia detection ──
-    if t.get("injected_blocks") and "resumption" in " ".join(t["injected_blocks"]):
+    if t.get("injected_blocks") and "resumption" in t["injected_blocks"]:
         if AMNESIA_PATTERNS.search(response_text):
             logger.warning(
                 "continuum: AMNESIA VIOLATION — asked for context already "

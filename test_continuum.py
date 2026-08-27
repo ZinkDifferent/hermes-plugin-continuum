@@ -32,7 +32,7 @@ def verified_turn(turn_id="t", user_message=""):
     """Fresh turn that has passed verification (so gates focus on what we test)."""
     state.new_turn(turn_id)
     state.turn()["user_message"] = user_message
-    gates.on_pre_tool_call(tool="read_file")
+    gates.on_pre_tool_call(tool_name="read_file", args={})
     return state.turn()
 
 
@@ -79,10 +79,10 @@ check("required skills recorded", st["required_skills"] == ["proxmox-ve"], str(s
 
 print("== gate: skill required ==")
 t = verified_turn("tskill")
-r = gates.on_pre_tool_call(tool="terminal", command="ls")
-check("blocks action without task skill", r is not None and "SKILL REQUIRED" in r, str(r))
+r = gates.on_pre_tool_call(tool_name="terminal", args={"command": "ls"})
+check("blocks action without task skill", r is not None and "SKILL REQUIRED" in (r.get("message") or ""), str(r))
 t["skills_loaded"].add("proxmox-ve")  # simulate skill_view
-r = gates.on_pre_tool_call(tool="terminal", command="ls")
+r = gates.on_pre_tool_call(tool_name="terminal", args={"command": "ls"})
 check("passes after skill loaded", r is None, str(r))
 
 # Missing-skill tasks don't hard-block (skill doesn't exist to load)
@@ -97,16 +97,18 @@ check("missing skills do NOT block", r is None, str(r))
 state.clear_task()
 
 # ── Gate 1: verify-before-act ──────────────────────────────────────────
+# NOTE: callbacks receive HOST-shaped kwargs (tool_name, args={...}),
+# matching hermes_cli/plugins.py:6477 dispatch.
 
 print("== gate 1: verify-before-act ==")
 state.new_turn("t1")
-r = gates.on_pre_tool_call(tool="terminal", command="ls")
-check("blocks terminal without verification", r is not None and "VERIFY" in r, str(r))
+r = gates.on_pre_tool_call(tool_name="terminal", args={"command": "ls"})
+check("blocks terminal without verification", r is not None and "VERIFY" in (r.get("message") if isinstance(r, dict) else r), str(r))
 
-r = gates.on_pre_tool_call(tool="read_file")
+r = gates.on_pre_tool_call(tool_name="read_file", args={})
 check("verification tool passes", r is None, str(r))
 
-r = gates.on_pre_tool_call(tool="terminal", command="ls")
+r = gates.on_pre_tool_call(tool_name="terminal", args={"command": "ls"})
 check("terminal passes after verification", r is None, str(r))
 
 # ── Error classification (refined interpretation) ──────────────────────
@@ -142,23 +144,32 @@ check("ordinary nonzero = command (no lock)", k == "command", k)
 
 print("== lockout semantics ==")
 t = verified_turn("tl1")
-gates.on_post_tool_call(tool="terminal", command="python3 test_x.py",
+gates.on_post_tool_call(tool_name="terminal", args={"command": "python3 test_x.py"},
                         result={"exit_code": 1, "output": "FAIL"})
 check("expected failure does NOT lock", t["locked"] is False)
 
-gates.on_post_tool_call(tool="terminal", command="make build",
+gates.on_post_tool_call(tool_name="terminal", args={"command": "make build"},
                         result={"exit_code": 2, "output": "error: syntax"})
 check("command failure does NOT lock", t["locked"] is False)
 
-gates.on_post_tool_call(tool="terminal", command="curl -s https://x --max-time 5",
+# False-positive regression (Aug 27 audit): grep output CONTAINING a fault
+# string is quoted data, not a live fault — must never lock.
+t = verified_turn("tl1b")
+gates.on_post_tool_call(
+    tool_name="terminal",
+    args={"command": "grep 'killed:' errors.log"},
+    result={"exit_code": 0, "output": "...WARNING killed: 1..."})
+check("grep output containing 'killed:' does NOT lock", t["locked"] is False)
+
+gates.on_post_tool_call(tool_name="terminal", args={"command": "curl -s https://x --max-time 5"},
                         result={"exit_code": 28, "output": "command timed out after 5s"})
 check("infra failure DOES lock", t["locked"] is True)
 check("failure recorded", len(t["action_failures"]) >= 1, str(t["action_failures"]))
 
-r = gates.on_pre_tool_call(tool="terminal", command="echo hi")
-check("locked turn blocks action tools", r is not None and "LOCKOUT" in r, str(r))
+r = gates.on_pre_tool_call(tool_name="terminal", args={"command": "echo hi"})
+check("locked turn blocks action tools", r is not None and "LOCKOUT" in (r.get("message") or ""), str(r))
 
-r = gates.on_pre_tool_call(tool="read_file")
+r = gates.on_pre_tool_call(tool_name="read_file", args={})
 check("verification still allowed when locked", r is None, str(r))
 
 # ── Gate 3: timeout arithmetic ─────────────────────────────────────────
@@ -167,23 +178,20 @@ print("== gate 3: timeout arithmetic ==")
 t = verified_turn("t2")
 
 r = gates.on_pre_tool_call(
-    tool="terminal",
-    command="curl -s --max-time 15 https://example.com",
-    timeout=15,
+    tool_name="terminal",
+    args={"command": "curl -s --max-time 15 https://example.com", "timeout": 15},
 )
-check("equal timeouts blocked", r is not None and "TIMEOUT" in r, str(r))
+check("equal timeouts blocked", r is not None and "TIMEOUT" in (r.get("message") or ""), str(r))
 
 r = gates.on_pre_tool_call(
-    tool="terminal",
-    command="curl -s --max-time 15 https://example.com",
-    timeout=30,
+    tool_name="terminal",
+    args={"command": "curl -s --max-time 15 https://example.com", "timeout": 30},
 )
 check("staggered timeouts pass", r is None, str(r))
 
 r = gates.on_pre_tool_call(
-    tool="terminal",
-    command="curl -s https://example.com",
-    timeout=15,
+    tool_name="terminal",
+    args={"command": "curl -s https://example.com", "timeout": 15},
 )
 check("no internal timeout passes", r is None, str(r))
 
@@ -193,30 +201,30 @@ print("== gate 6: ssh guard ==")
 t = verified_turn("t3")
 
 r = gates.on_pre_tool_call(
-    tool="terminal",
-    command="sshpass -p 'x' ssh root@203.0.113.5 'ls'",
+    tool_name="terminal",
+    args={"command": "sshpass -p 'x' ssh root@203.0.113.5 'ls'"},
 )
-check("unknown host warned", r is not None and "SSH GUARD" in r, str(r))
+check("unknown host warned", r is not None and "SSH GUARD" in (r.get("message") or ""), str(r))
 
 connections.record("203.0.113.5", user="root", cred_source="user-provided")
 r = gates.on_pre_tool_call(
-    tool="terminal",
-    command="sshpass -p 'x' ssh root@203.0.113.5 'ls'",
+    tool_name="terminal",
+    args={"command": "sshpass -p 'x' ssh root@203.0.113.5 'ls'"},
 )
 check("known host passes", r is None, str(r))
 
 gates.on_post_tool_call(
-    tool="terminal", command="sshpass -p 'x' ssh root@203.0.113.5 'ls'",
+    tool_name="terminal", args={"command": "sshpass -p 'x' ssh root@203.0.113.5 'ls'"},
     result={"exit_code": 255, "output": "Permission denied (publickey,password)."})
 check("auth failure recorded", state.session()["ssh_auth_failed"].get("203.0.113.5", 0) >= 1,
       str(state.session()["ssh_auth_failed"]))
 
 t = verified_turn("t4")
 r = gates.on_pre_tool_call(
-    tool="terminal",
-    command="sshpass -p 'y' ssh root@203.0.113.5 'ls'",
+    tool_name="terminal",
+    args={"command": "sshpass -p 'y' ssh root@203.0.113.5 'ls'"},
 )
-check("retry blocked after auth failure", r is not None and "already failed" in r, str(r))
+check("retry blocked after auth failure", r is not None and "already failed" in (r.get("message") or ""), str(r))
 
 # ── Continuity: gap detection ──────────────────────────────────────────
 
