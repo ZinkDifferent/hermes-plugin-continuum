@@ -12,7 +12,24 @@ Run with the Hermes venv:
 import os
 import sys
 
-_HERMES_HOME = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+# Source resolution: HERMES_HOME env or ~/.hermes (same as the host).
+_SOURCE_HOME = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+
+# State isolation: by default the suite runs against a throwaway HERMES_HOME
+# (real hermes-agent/plugins source symlinked in, state store isolated), so
+# test fixtures can never pollute live plugin state on any installation.
+# Opt back into the live state store with CONTINUUM_TEST_LIVE_STATE=1.
+if os.environ.get("CONTINUUM_TEST_LIVE_STATE") == "1":
+    _HERMES_HOME = _SOURCE_HOME
+else:
+    import tempfile
+    _HERMES_HOME = tempfile.mkdtemp(prefix="continuum-test-home-")
+    for _d in ("hermes-agent", "plugins"):
+        _src = os.path.join(_SOURCE_HOME, _d)
+        if os.path.isdir(_src):
+            os.symlink(_src, os.path.join(_HERMES_HOME, _d))
+    os.environ["HERMES_HOME"] = _HERMES_HOME  # host resolves state from this
+
 HERMES_SRC = os.path.join(_HERMES_HOME, "hermes-agent")
 PLUGINS_DIR = os.path.join(_HERMES_HOME, "plugins")
 for p in (HERMES_SRC, PLUGINS_DIR):
