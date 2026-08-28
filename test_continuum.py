@@ -78,6 +78,11 @@ check("required skills recorded", st["required_skills"] == ["proxmox-ve"], str(s
 # ── Gate: skill-required (Req 3) — before other gate tests ────────────
 
 print("== gate: skill required ==")
+# Hermetic fixture: the skill-gate tests must not depend on which skills a
+# given machine has installed (VMs carry a minimal library). Guarantee the
+# fixture skills resolve as available, then restore.
+_avail_backup = state._available_skills
+state._available_skills = lambda: _avail_backup() | {"proxmox-ve", "grommunio", "shipment-tracker", "withings-health", "protocol-state-management"}
 t = verified_turn("tskill")
 r = gates.on_pre_tool_call(tool_name="terminal", args={"command": "ls"})
 check("blocks action without task skill", r is not None and "SKILL REQUIRED" in (r.get("message") or ""), str(r))
@@ -92,6 +97,7 @@ state.update_session(lambda s: s.update({"required_skills": ["nonexistent-skill"
 t2 = verified_turn("tskill2")
 r = gates.on_pre_tool_call(tool="terminal", command="ls")
 check("missing skills do NOT block", r is None, str(r))
+state._available_skills = _avail_backup  # restore real skill discovery
 
 # Clear task for subsequent gate tests
 state.clear_task()

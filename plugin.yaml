@@ -20,6 +20,16 @@ provides_commands:
 # Missing skills are reported via /continuum status as "skills_missing" — the plugin
 # still works without them, but task-skill gating won't enforce their loading.
 requires_skills:
+  # Essential/core set — bundled in this repo under skills/ and installed to
+  # ~/.hermes/skills/ by scripts/install-essential-skills.sh (see below).
+  - essential_skills
+  - the_truth
+  - file-verification-protocol
+  - user-correction-protocol
+  - humanizer
+  # Task-routing skills (NOT bundled; installed only where used). Missing
+  # skills are reported via /continuum status as "skills_missing" — the plugin
+  # still works without them, but task-skill gating won't enforce their loading.
   - proxmox-ve
   - esxi-proxmox-vm-migration
   - cloudpanel
