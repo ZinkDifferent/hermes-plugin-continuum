@@ -9,10 +9,12 @@ Run with the Hermes venv:
   /Users/hzink/.hermes/hermes-agent/venv/bin/python test_integration.py
 """
 
+import os
 import sys
 
-HERMES_SRC = "/Users/hzink/.hermes/hermes-agent"
-PLUGINS_DIR = "/Users/hzink/.hermes/plugins"
+_HERMES_HOME = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+HERMES_SRC = os.path.join(_HERMES_HOME, "hermes-agent")
+PLUGINS_DIR = os.path.join(_HERMES_HOME, "plugins")
 for p in (HERMES_SRC, PLUGINS_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
