@@ -24,6 +24,7 @@ requires_skills:
   # ~/.hermes/skills/ by scripts/install-essential-skills.sh (see below).
   - essential_skills
   - the_truth
+  - temporal-awareness
   - file-verification-protocol
   - user-correction-protocol
   - humanizer
