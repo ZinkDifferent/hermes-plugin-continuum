@@ -83,6 +83,11 @@ print("== gate: skill required ==")
 # fixture skills resolve as available, then restore.
 _avail_backup = state._available_skills
 state._available_skills = lambda: _avail_backup() | {"proxmox-ve", "grommunio", "shipment-tracker", "withings-health", "protocol-state-management"}
+# Re-resolve under patched availability: on machines without the fixture
+# skills installed, the earlier resolve recorded them as skills_missing,
+# and the gate then (correctly) declines to block. Re-running makes the
+# session state match the hermetic fixture on every machine.
+state.resolve_skills_for_task("proxmox work")
 t = verified_turn("tskill")
 r = gates.on_pre_tool_call(tool_name="terminal", args={"command": "ls"})
 check("blocks action without task skill", r is not None and "SKILL REQUIRED" in (r.get("message") or ""), str(r))
