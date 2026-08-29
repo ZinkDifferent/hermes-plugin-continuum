@@ -4,9 +4,11 @@ A Hermes Agent plugin that consolidates enforcement gates (Charon/Circe/Veritas 
 
 Production-verified over five days (~330 turns) alongside [MemoryOS](https://github.com/ClaudioDrews/memory-os) and GLM-5.3-Flash — see [Recommended Stack](#recommended-stack) below.
 
+Continuum registers **six hooks** spanning the full turn lifecycle — `on_session_start`, `pre_llm_call`, `pre_tool_call`, `post_tool_call`, `post_llm_call`, `transform_llm_output` — plus the `/continuum` command.
+
 ## What It Does
 
-### A. Enforcement Gates (`pre_tool_call` / `post_tool_call`)
+### A. Enforcement Gates (`pre_tool_call` / `post_tool_call` / `transform_llm_output`)
 
 | Gate | Function |
 |------|----------|
@@ -14,9 +16,14 @@ Production-verified over five days (~330 turns) alongside [MemoryOS](https://git
 | **Gate 2** — one-failure lockout | Only genuine infrastructure failures (timeouts, connection refused, DNS, SSH auth) lock the turn. Ordinary command failures and benign not-found outcomes never lock |
 | **Gate 3** — timeout arithmetic | Blocks commands whose internal `--max-time` exceeds the terminal timeout — prevents the classic self-timeout trap |
 | **Gate 6** — SSH/connection guard | One-strike SSH auth rule, known-host registry, credential-guessing block |
+| **Gate V** — venture separation | Blocks (pre-execution) any command writing one venture's credential onto another venture's infrastructure. Release requires explicit user acknowledgment: `/continuum ack-venture <name>` (30-minute TTL) |
+| **Gate P1/P4** — claim provenance | Appends a visible `[PROVENANCE AUDIT]` footer when the final response asserts availability/state ("X is callable", "X is up") without a same-turn tool-verified anchor. Includes the list≠callable rule: a models/directory listing cannot anchor a callability claim |
+| **Gate 3-new** — verification-before-conclusion | After two same-method failed probes, an "offline/down" conclusion gets a `[VERIFICATION GAP]` footer unless a third, different-method probe ran first |
 | **Task-skill gate** | Action tools require task-matched skills to be loaded first (when a task is set via `/continuum task`) |
 
 Error classification (refined): `EXPECTED` (test runners, guarded commands, benign not-found) and `COMMAND` (ordinary nonzero exits) never lock. `INFRA` (timeouts, connection failures, auth failures, OOM) locks the turn and requires user guidance — preventing cascading retry spirals.
+
+Pre-tool gates block **before execution** — the tool call never runs. Prose gates fire on `transform_llm_output`, after the response is generated — they cannot delete the answer, so they **append a visible audit footer** naming the unanchored claim instead of silently passing.
 
 ### B. Continuity Engine (`pre_llm_call` / `post_llm_call`)
 
@@ -40,7 +47,7 @@ hermes gateway restart
 Then verify:
 
 ```bash
-# Run the test suite (43 tests)
+# Run the test suites (44 unit checks; 23 integration checks through the real host hook dispatch)
 cd ~/.hermes/plugins/continuum && python3 test_continuum.py
 
 # Check status
@@ -63,6 +70,7 @@ cd ~/.hermes/plugins/continuum && python3 test_continuum.py
 /continuum task <name>         Set active task (+ auto-resolve skills)
 /continuum task clear          Drop active task
 /continuum conn                Show connection registry
+/continuum ack-venture <name> Acknowledge cross-venture key placement (30-min TTL)
 /continuum gates on|off        Toggle enforcement gates
 ```
 

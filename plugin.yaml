@@ -1,5 +1,5 @@
 name: continuum
-version: 0.1.0
+version: 0.2.0
 description: "Session continuity engine + enforcement harness. Gap detection with task resumption, mandatory skill matching per task, connection registry, verify-before-act and one-failure-lockout gates."
 author: hzink
 license: MIT
