@@ -26,6 +26,11 @@ _turn = {
     "injected_blocks": [],        # what we injected into this turn's prompt
     "facts_injected": [],         # fact ids injected (for auto fact_feedback)
     "user_message": "",
+    # 2026-08-28 gates 1-4 (provenance / venture / probe-tracking)
+    "commands_this_turn": [],      # terminal commands issued this turn
+    "verified_tools": set(),      # verification tools that returned results
+    "probe_failures": [],         # [{target, method}] connectivity failures
+    "probe_methods_used": set(),  # distinct probe methods attempted
 }
 
 
@@ -39,6 +44,10 @@ def new_turn(turn_id=None):
     _turn["injected_blocks"] = []
     _turn["facts_injected"] = []
     _turn["user_message"] = ""
+    _turn["commands_this_turn"] = []
+    _turn["verified_tools"] = set()
+    _turn["probe_failures"] = []
+    _turn["probe_methods_used"] = set()
 
 
 def turn():
@@ -76,6 +85,9 @@ DEFAULT_SESSION = {
     "ssh_auth_failed": {},    # host -> count (per-session)
     "no_skill_ack": False,    # explicit proceed-without-skill acknowledgment
     "gap_resumed": False,
+    # 2026-08-28 venture gate
+    "staged_key_venture": None,   # venture label of the last staged key file
+    "venture_key_ack": None,      # {"venture": str, "at": ts} user ack (30-min TTL)
 }
 
 GAP_THRESHOLD_SECONDS = 30 * 60  # 30 minutes

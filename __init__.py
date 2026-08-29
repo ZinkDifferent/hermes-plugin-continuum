@@ -43,17 +43,18 @@ def register(ctx):
     ctx.register_hook("pre_tool_call", _safe_none(gates.on_pre_tool_call))
     ctx.register_hook("post_tool_call", _safe_none(gates.on_post_tool_call))
     ctx.register_hook("post_llm_call", _safe(continuity.on_post_llm_call))
+    ctx.register_hook("transform_llm_output", _safe(continuity.on_transform_llm_output))
 
     ctx.register_command(
         name="continuum",
         description="Continuity engine: session/task state, connections, gates.",
         handler=_cmd_continuum,
-        args_hint="[status|task <name>|task clear|conn|gates on|gates off]",
+        args_hint="[status|task <name>|task clear|conn|gates on|gates off|ack-venture <name>]",
     )
 
     # Initialize persistent stores lazily via ctx.state facade.
     state.init(ctx)
-    logger.info("continuum registered (5 hooks, 1 command)")
+    logger.info("continuum registered (6 hooks, 1 command)")
 
 
 def _safe(fn):
@@ -102,6 +103,18 @@ def _cmd_continuum(args: str, ctx=None, **kwargs) -> str:
         enabled = len(parts) > 1 and parts[1].lower() == "on"
         gates.set_enabled(enabled)
         return f"Gates {'enabled' if enabled else 'disabled'}."
+    if sub == "ack-venture" and len(parts) > 1:
+        venture = parts[1].strip().lower()
+        import time as _time
+        def _ack(st):
+            st["venture_key_ack"] = {"venture": venture, "at": _time.time()}
+        from . import state as _st
+        _st.update_session(_ack)
+        return (
+            f"Venture acknowledgment recorded: '{venture}' keys may be placed "
+            f"on other-venture infrastructure for the next 30 minutes."
+        )
     return (
-        "Usage: /continuum [status|task <name>|task clear|conn|gates on|gates off]"
+        "Usage: /continuum [status|task <name>|task clear|conn|gates on|"
+        "gates off|ack-venture <name>]"
     )

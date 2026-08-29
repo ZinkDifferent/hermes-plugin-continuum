@@ -39,6 +39,7 @@ locked the turn).
 
 import logging
 import re
+import time
 
 from . import state
 from . import connections
@@ -46,6 +47,94 @@ from . import connections
 logger = logging.getLogger(__name__)
 
 _enabled = True
+
+# ── Gate V (venture separation, 2026-08-28 corrective build) ────────────
+# Hosts known to belong to a specific venture. Commands that WRITE
+# credentials/secrets (env-file appends, key injection, heredocs writing
+# keys) targeting a host of venture A while carrying a key labeled venture
+# B are blocked pending explicit user acknowledgment.
+# Key provenance is detected from the SOURCE PATH of the staged key
+# (/tmp/orkey.txt-style temp files are unlabeled → treated as the last
+# venture the key was staged for, tracked in session state).
+
+_VENTURE_HOSTS = {
+    "184.105.199.114": "astera",
+    "asteraintelligence.com": "astera",
+    "184.105.199.113": "thinkingmachine",
+    "thinkingmachine.me": "thinkingmachine",
+    "hermes-macmini-1": "personal",
+    "100.95.3.16": "personal",
+}
+
+# Commands that move credentials onto a machine
+_CRED_WRITE_RE = re.compile(
+    r"(>>?\s*[^\s]*\.env\b|tee\s+-a\s*[^\s]*\.env|"
+    r"echo\s+[A-Z_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*=)"
+    r"|"
+    r"(scp|rsync|ssh)\s+[^\s]*orkey[^\s]*"
+    r"|"
+    r"(shred|rm)\s+(-f\s+)?[^\s]*orkey",
+    re.I,
+)
+
+# Explicit acknowledgment flag lives in session state:
+#   st["venture_key_ack"] = {"target_venture": <name>, "at": <ts>}
+# Set ONLY by the user via /continuum ack-venture <venture> (30-min TTL).
+
+
+def _venture_of_host(host):
+    if not host:
+        return None
+    return _VENTURE_HOSTS.get(host) or _VENTURE_HOSTS.get(str(host).strip())
+
+
+def _venture_guard(command):
+    """Block cross-venture credential writes unless user acknowledged."""
+    if not command or not _CRED_WRITE_RE.search(command):
+        return None
+    st = state.session()
+    # Which venture is this key FOR? Track last-staged key venture.
+    key_venture = st.get("staged_key_venture")
+    if not key_venture:
+        return None  # unlabeled staging — cannot judge; don't block
+    # Which venture is the target host?
+    target_venture = None
+    for host, venture in _VENTURE_HOSTS.items():
+        if host in command:
+            target_venture = venture
+            break
+    if not target_venture or target_venture == key_venture:
+        return None
+    ack = st.get("venture_key_ack") or {}
+    if ack.get("venture") == key_venture and (time.time() - ack.get("at", 0)) < 1800:
+        return None  # acknowledged within 30 min
+    return (
+        f"VENTURE SEPARATION: this command writes a credential belonging to "
+        f"the '{key_venture}' venture onto infrastructure of the "
+        f"'{target_venture}' venture. Ventures must stay ENTIRELY separate. "
+        f"If the user has explicitly approved this specific cross-venture "
+        f"placement, they can acknowledge with: /continuum ack-venture "
+        f"{key_venture} (valid 30 minutes). Otherwise, do not proceed."
+    )
+
+
+def _stage_key_venture(command):
+    """Record which venture a staged key file belongs to, from the command
+    that stages it (e.g. writing the key to /tmp from a user message that
+    names the venture, or scp'ing a venture's key file around)."""
+    if not command:
+        return None
+    low = command.lower()
+    # The staging command's context: venture keywords near the key write
+    for venture in ("astera", "thinkingmachine"):
+        marker = f"{venture}-key" if "key" in low else venture
+        if venture in low and (".txt" in low or ".env" in low or "orkey" in low or "/tmp" in low):
+            if re.search(r"(write|echo|printf|tee|>|scp)", low):
+                def _rec(st):
+                    st["staged_key_venture"] = venture
+                state.update_session(_rec)
+                return venture
+    return None
 
 
 def is_enabled():
@@ -281,6 +370,41 @@ def _ssh_guard(command):
     return None
 
 
+# ── Gate 3-new helpers: failed-probe tracking ───────────────────────────
+# Verification-before-conclusion: after 2 failed probes of the SAME target,
+# an "offline/unreachable/down" conclusion requires a third, DIFFERENT-method
+# probe before it may be stated as fact. (Session case: mini declared
+# offline after 2 same-method probes; a different-method probe would have
+# shown it reachable.)
+
+_CONCLUSION_RE = re.compile(
+    r"\b(is|are)\s+(offline|down|unreachable|not responding|not reachable)\b",
+    re.I,
+)
+
+def _conclusion_guard(response_text, turn_state):
+    """Return a footer warning if an offline-conclusion lacks a
+    different-method probe after 2+ failures. Observer-level (transform)."""
+    t = turn_state or {}
+    fails = t.get("probe_failures") or []
+    if len(fails) < 2:
+        return ""
+    if not response_text or not _CONCLUSION_RE.search(response_text):
+        return ""
+    methods = {f.get("method") for f in fails if isinstance(f, dict)}
+    # different-method probe already run this turn?
+    probed = t.get("probe_methods_used") or set()
+    if len(probed) > len(methods):
+        return ""
+    return (
+        "\n\n---\n[VERIFICATION GAP] This response concludes a target is "
+        "offline/down after only failed same-method probes. Before stating "
+        "this as fact: run a third, DIFFERENT-method probe (e.g. if SSH "
+        "failed twice, try ping, the hypervisor console, or another "
+        "protocol) — or qualify the claim as unverified."
+    )
+
+
 # ── pre_tool_call ───────────────────────────────────────────────────────
 
 def on_pre_tool_call(**kwargs):
@@ -342,6 +466,13 @@ def on_pre_tool_call(**kwargs):
     # Command-level checks
     command = _command_of(kwargs)
     if command and tool in ("terminal", "process"):
+        # Gate 3-new — probe tracking for verification-before-conclusion
+        t.setdefault("commands_this_turn", []).append(command)
+        # Gate V — venture separation (credential writes)
+        _stage_key_venture(command)
+        vproblem = _venture_guard(command)
+        if vproblem:
+            return _block(vproblem)
         # Gate 3 — timeout arithmetic
         a = _args_of(kwargs)
         tt = a.get("timeout")
@@ -374,6 +505,12 @@ def on_post_tool_call(**kwargs):
     command = _command_of(kwargs)
 
     t = state.turn()
+    # Gate 3-new — verification-before-conclusion bookkeeping: a
+    # verification tool that RETURNED a result counts as an anchor.
+    # (Runs OUTSIDE the ACTION_TOOLS branch — verification tools are a
+    # different set.)
+    if tool in state.VERIFICATION_TOOLS and result is not None:
+        t.setdefault("verified_tools", set()).add(tool)
     if tool in state.ACTION_TOOLS:
         klass = classify_failure(command=command, result=result, error=error)
 
@@ -410,5 +547,18 @@ def on_post_tool_call(**kwargs):
                 s["ssh_auth_failed"][target] = s["ssh_auth_failed"].get(target, 0) + 1
             state.update_session(_mark)
             logger.warning("continuum: SSH auth failure recorded for %s", target)
+
+        # Gate 3-new — failed-probe tracking (connectivity-class failures,
+        # by method: ssh / ping / dns / http)
+        low_cmd = (command or "").lower()
+        if _INFRA_SIGNATURES and _find_signatures(low, ("timed out", "connection refused", "connection reset", "no route to host", "name resolution", "could not resolve host")):
+            method = "ssh" if _SSH_RE.search(low_cmd) else (
+                "ping" if "ping" in low_cmd else (
+                "dns" if any(x in low_cmd for x in ("dig ", "nslookup", "host ")) else (
+                "http" if any(x in low_cmd for x in ("curl", "wget")) else "other")))
+            target = _ssh_target(command) or "unknown"
+            t.setdefault("probe_failures", []).append(
+                {"target": target, "method": method})
+            t.setdefault("probe_methods_used", set()).add(method)
 
     return None

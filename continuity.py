@@ -213,4 +213,50 @@ def _auto_fact_feedback(response_text, t):
                 break
         t["facts_injected"] = []
     except Exception as e:
-        logger.debug("continuum fact_feedback skipped: %s", e)
+        logger.debug("fact_feedback skipped: %s", e)
+
+
+# ── transform_llm_output (2026-08-28 gates 1-4 enforcement point) ──────
+
+def on_transform_llm_output(**kwargs):
+    """Host contract (turn_finalizer.py:601-623): first non-empty string
+    return REPLACES the final response. We append audit footers when the
+    turn's prose carries unanchored claims (gate P1/P4) or an offline
+    conclusion without a different-method probe (gate 3-new)."""
+    response_text = ""
+    for key in ("response_text", "response", "text", "output"):
+        v = kwargs.get(key)
+        if isinstance(v, str) and v:
+            response_text = v
+            break
+    if not response_text:
+        return None
+    t = state.turn()
+    footers = []
+
+    # Gate P1/P4 — claim provenance + list≠callable
+    try:
+        from . import provenance as _prov
+        if _prov.is_enabled():
+            f = _prov.audit_footer(response_text, t)
+            if f:
+                footers.append(f)
+    except Exception as e:
+        logger.debug("provenance footer skipped: %s", e)
+
+    # Gate 3-new — verification-before-conclusion
+    try:
+        from . import gates as _g
+        f = _g._conclusion_guard(response_text, t)
+        if f:
+            footers.append(f)
+    except Exception as e:
+        logger.debug("conclusion guard skipped: %s", e)
+
+    if not footers:
+        return None
+    out = response_text
+    for f in footers:
+        if f not in out:
+            out += f
+    return out

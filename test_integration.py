@@ -214,6 +214,79 @@ continuity.on_post_llm_call(
 check("amnesia violation detected via assistant_response kwarg",
       any("AMNESIA VIOLATION" in m for m in captured), str(captured))
 
+print("== 7. venture separation gate (2026-08-28 build) ==")
+# Stage an astera key, then attempt a credential write to thinkingmachine host
+state.new_turn("i7")
+state.update_session(lambda s: s.update({"staged_key_venture": "astera", "venture_key_ack": None}))
+host_pre("read_file", {"path": "/tmp/x"})  # verify
+# register both hosts as known connections (else the pre-existing SSH
+# guard blocks first — correct behavior, wrong for THIS test's focus)
+import continuum.connections as _conn
+_conn.record("184.105.199.113", user="root", cred_source="test")
+_conn.record("184.105.199.114", user="root", cred_source="test")
+block, mod = host_pre("terminal", {"command": "echo FAL_KEY=xyz >> /home/memos/.hermes/.env && ssh root@184.105.199.113 true"})
+check("cross-venture cred write BLOCKED",
+      block is not None and "VENTURE SEPARATION" in block, repr(block))
+# same-venture write passes
+block, mod = host_pre("terminal", {"command": "echo FAL_KEY=xyz >> /home/memo/.hermes/.env && ssh root@184.105.199.114 true"})
+check("same-venture cred write passes",
+      block is None, repr(block))
+# after user ack, cross-venture passes
+state.update_session(lambda s: s.update({"venture_key_ack": {"venture": "astera", "at": __import__('time').time()}}))
+block, mod = host_pre("terminal", {"command": "echo FAL_KEY=xyz >> /home/memos/.hermes/.env && ssh root@184.105.199.113 true"})
+check("acked cross-venture write passes",
+      block is None, repr(block))
+state.update_session(lambda s: s.update({"staged_key_venture": None, "venture_key_ack": None}))
+
+print("== 8. provenance transform: list≠callable footer (2026-08-28 build) ==")
+state.new_turn("i8")
+# simulate list-only evidence: commands that LIST models, verification not real
+state.turn()["commands_this_turn"] = ["curl -s https://ollama.com/v1/models -H auth"]
+state.turn()["verification_called"] = False
+out = continuity.on_transform_llm_output(
+    response_text="GLM-5.3-flash is available on this key and callable.",
+    session_id="s", model="m", platform="cli")
+check("list-only evidence + callability claim -> footer appended",
+      out is not None and "PROVENANCE AUDIT" in out, repr(out)[:200])
+# real verification suppresses footer
+state.new_turn("i8b")
+state.turn()["commands_this_turn"] = ["curl -s https://ollama.com/v1/chat/completions -d test"]
+state.turn()["verification_called"] = True
+out = continuity.on_transform_llm_output(
+    response_text="GLM-5.3-flash is callable — live test returned OK.",
+    session_id="s", model="m", platform="cli")
+check("real-invocation turn -> no footer",
+      out is None, repr(out))
+
+print("== 9. verification-before-conclusion footer (2026-08-28 build) ==")
+state.new_turn("i9")
+state.turn()["probe_failures"] = [
+    {"target": "hermes-macmini-1", "method": "ssh"},
+    {"target": "hermes-macmini-1", "method": "ssh"},
+]
+state.turn()["probe_methods_used"] = {"ssh"}
+out = continuity.on_transform_llm_output(
+    response_text="The mini is offline. It cannot be reached.",
+    session_id="s", model="m", platform="cli")
+check("2 same-method fails + offline claim -> verification-gap footer",
+      out is not None and "VERIFICATION GAP" in out, repr(out)[:200])
+# different-method probe run -> no footer. (verified_tools anchors the
+# response so the provenance footer also stays silent — an offline claim
+# backed by real probes is a tool-verified state assertion.)
+state.new_turn("i9b")
+state.turn()["probe_failures"] = [
+    {"target": "hermes-macmini-1", "method": "ssh"},
+    {"target": "hermes-macmini-1", "method": "ssh"},
+]
+state.turn()["probe_methods_used"] = {"ssh", "ping"}
+state.turn()["verified_tools"] = {"terminal"}
+state.turn()["verification_called"] = True
+out = continuity.on_transform_llm_output(
+    response_text="The mini is offline.",
+    session_id="s", model="m", platform="cli")
+check("different-method probe present -> no footer",
+      out is None, repr(out))
+
 print()
 print(f"RESULTS: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
