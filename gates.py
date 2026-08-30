@@ -435,7 +435,7 @@ def on_pre_tool_call(**kwargs):
     # Gate 2 — lockout check first (only infra failures lock)
     if tool in state.ACTION_TOOLS and t["locked"]:
         return _block(
-            "CIRCE LOCKOUT: an infrastructure failure already occurred this "
+            "CONTINUUM'S CIRCE/GATE 2 LOCKOUT: an infrastructure failure already occurred this "
             "turn. All further action tools are blocked. Inform the user of "
             "the failure and ask for guidance before proceeding."
         )
