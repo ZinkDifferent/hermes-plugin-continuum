@@ -37,6 +37,36 @@ Pre-tool gates block **before execution** — the tool call never runs. Prose ga
 | **Amnesia detection** | Flags responses that ask for context already injected in the resumption block |
 | **Relative-time advisory** | Flags relative-time terms in responses (advisory) |
 
+### C. Claim Verification (`transform_llm_output` — verifier.py)
+
+| Feature | Function |
+|---------|----------|
+| **Pre-flight claim verification** | Every factual claim (digits, $ amounts, dates, proper nouns) in the agent's response is cross-checked against the turn's actual tool outputs + fact store + injected memory via an independent glm-5.3-flash judge session |
+| **FAIL-CLOSED mode** | Unverified claims are REMOVED before the response ships — never tagged, never passed silently |
+| **Verify-before-release bounce** | Unverified claims bounce back to the agent with a remediation block; the agent must run REAL tool calls and rewrite (max 2 bounces, then hard removal) |
+| **N-turn lookback buffer** | Evidence window includes tool outputs from the previous **N=5 turns** (adjustable via `state.LOOKBACK_TURNS`), not just the current turn — eliminates false-positive bounces on claims referencing earlier-turn data in long conversations |
+| **Trace-marker bypass** | Sentences with explicit evidence markers ([tool output], [user message], [facts]) ship untagged |
+
+## Changelog
+
+### v0.3.0 (Sep 04 2026)
+
+**feat: N-turn lookback buffer for verifier evidence window**
+
+- `state.py`: Added `LOOKBACK_TURNS = 5` constant + `_tool_output_history` rolling deque. `new_turn()` shifts the previous turn's `tool_outputs_this_turn` into the history buffer before resetting.
+- `verifier.py` (NEW FILE): Full pre-flight claim verification pipeline — Layer 1 deterministic claim extraction, Layer 2 independent glm-5.3-flash judge, FAIL-CLOSED mode, verify-before-release bounce loop.
+- `_turn_evidence()` expanded: evidence blocks now include tool outputs from the previous 5 turns (labeled `[HIST-{turn_id}-TOOL-{n}]`), not just the current turn.
+- `continuity.py`: `verify_response()` wired into `on_transform_llm_output` pipeline, running before provenance footer audit.
+
+**Motivation:** verify-gate false positives in long conversations — claims referencing data from earlier turns bounced because the evidence window was current-turn-only. The lookback buffer (N=5, adjustable to 8/10 via `state.LOOKBACK_TURNS`) gives the judge access to previous turns' tool outputs.
+
+### v0.2.0 (Aug 29 2026)
+
+- Gates V (venture separation), P1/P4 (claim provenance), 3-new (verification-before-conclusion)
+- Verify-gate bounce mechanism with 2-round cap
+- `/continuum ack-venture` command
+- Gate 2 lockout message renamed to CONTINUUM'S CIRCE/GATE 2 LOCKOUT
+
 ## Installation
 
 ```bash
