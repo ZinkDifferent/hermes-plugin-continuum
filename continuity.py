@@ -222,7 +222,14 @@ def on_transform_llm_output(**kwargs):
     """Host contract (turn_finalizer.py:601-623): first non-empty string
     return REPLACES the final response. We append audit footers when the
     turn's prose carries unanchored claims (gate P1/P4) or an offline
-    conclusion without a different-method probe (gate 3-new)."""
+    conclusion without a different-method probe (gate 3-new).
+
+    Pre-flight verification (2026-08-29 build): verifier.verify_response runs
+    FIRST — Layer 1 extracts narrative/price/relationship claims, Layer 2
+    cross-checks flagged claims against turn tool results + fact evidence via
+    an independent glm-5.3-flash judge session. CONTRADICTED claims are
+    removed; UNVERIFIABLE ones tagged inline. Fail-open by design.
+    """
     response_text = ""
     for key in ("response_text", "response", "text", "output"):
         v = kwargs.get(key)
@@ -233,6 +240,15 @@ def on_transform_llm_output(**kwargs):
         return None
     t = state.turn()
     footers = []
+    original_text = response_text
+
+    # Pre-flight verifier (2026-08-29) — runs before provenance so corrected
+    # text is what the provenance footer audit sees.
+    try:
+        from . import verifier as _verifier
+        response_text = _verifier.verify_response(response_text, t)
+    except Exception as e:
+        logger.debug("verifier pass skipped: %s", e)
 
     # Gate P1/P4 — claim provenance + list≠callable
     try:
@@ -252,6 +268,19 @@ def on_transform_llm_output(**kwargs):
             footers.append(f)
     except Exception as e:
         logger.debug("conclusion guard skipped: %s", e)
+
+    # If the verifier corrected the text (claim removed/tagged), return the
+    # corrected text — host contract: first non-empty string REPLACES.
+    changed_by_verifier = (
+        "[claim removed" in response_text or "[UNVERIFIED-CLAIM]" in response_text
+    ) and response_text != original_text
+    if changed_by_verifier:
+        # Append any pending footers for context, then release the corrected text.
+        out = response_text
+        for f in footers:
+            if f not in out:
+                out += f
+        return out
 
     if not footers:
         return None

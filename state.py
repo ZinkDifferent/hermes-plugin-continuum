@@ -8,11 +8,18 @@ import json
 import logging
 import re
 import time
+from collections import deque
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _ctx = None  # PluginContext, set by init()
+
+# ── Tool-output lookback buffer (Sep 04 2026, user directive) ──────────
+# Rolling history of tool outputs from the last N turns, used by verifier
+# to expand its evidence window beyond just the current turn.
+LOOKBACK_TURNS = 5  # adjustable to 8/10 later
+_tool_output_history = deque(maxlen=LOOKBACK_TURNS)
 
 # ── TurnState ──────────────────────────────────────────────────────────
 
@@ -35,6 +42,13 @@ _turn = {
 
 
 def new_turn(turn_id=None):
+    # Shift previous turn's tool outputs into the rolling history buffer
+    prev_outputs = _turn.get("tool_outputs_this_turn") or []
+    if prev_outputs:
+        _tool_output_history.append({
+            "turn_id": _turn.get("turn_id"),
+            "outputs": list(prev_outputs)
+        })
     _turn["turn_id"] = turn_id
     _turn["started_at"] = time.time()
     _turn["skills_loaded"] = set()
